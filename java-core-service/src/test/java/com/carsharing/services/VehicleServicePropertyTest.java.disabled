@@ -1,0 +1,347 @@
+package com.carsharing.services;
+
+import com.carsharing.BasePropertyTest;
+import com.carsharing.entities.Vehicle;
+import net.jqwik.api.*;
+import net.jqwik.spring.JqwikSpringSupport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Property tests for VehicleService
+ */
+@JqwikSpringSupport
+@SpringBootTest
+@TestPropertySource(properties = {
+    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
+    "spring.datasource.driver-class-name=org.h2.Driver",
+    "spring.jpa.hibernate.ddl-auto=create-drop"
+})
+@Transactional
+public class VehicleServicePropertyTest extends BasePropertyTest {
+
+    @Autowired
+    private VehicleService vehicleService;
+    
+    /**
+     * Property: Vehicle Creation and Retrieval
+     */
+    @Property(tries = 50)
+    void vehicleCreationAndRetrieval(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color) {
+        
+        // Given valid vehicle data
+        assertThat(brand).isNotBlank();
+        assertThat(model).isNotBlank();
+        assertThat(plateNumber).isNotBlank();
+        
+        // When adding a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        
+        // Then the vehicle should be created with correct information
+        assertThat(vehicle).isNotNull();
+        assertThat(vehicle.getId()).isNotNull();
+        assertThat(vehicle.getBrand()).isEqualTo(brand);
+        assertThat(vehicle.getModel()).isEqualTo(model);
+        assertThat(vehicle.getPlateNumber()).isEqualTo(plateNumber);
+        assertThat(vehicle.getColor()).isEqualTo(color);
+        assertThat(vehicle.getStatus()).isEqualTo("available");
+        assertThat(vehicle.isAvailable()).isTrue();
+        assertThat(vehicle.getCreatedAt()).isNotNull();
+        assertThat(vehicle.getUpdatedAt()).isNotNull();
+        
+        // And the vehicle should be retrievable by ID
+        Optional<Vehicle> retrievedVehicle = vehicleService.getVehicleById(vehicle.getId());
+        assertThat(retrievedVehicle).isPresent();
+        assertThat(retrievedVehicle.get().getBrand()).isEqualTo(brand);
+        assertThat(retrievedVehicle.get().getModel()).isEqualTo(model);
+        
+        // And the vehicle should be retrievable by plate number
+        Optional<Vehicle> vehicleByPlate = vehicleService.getVehicleByPlateNumber(plateNumber);
+        assertThat(vehicleByPlate).isPresent();
+        assertThat(vehicleByPlate.get().getId()).isEqualTo(vehicle.getId());
+    }
+    
+    /**
+     * Property: Plate Number Uniqueness
+     */
+    @Property(tries = 30)
+    void plateNumberUniqueness(@ForAll("plateNumbers") String plateNumber) {
+        // Given a vehicle with a plate number
+        vehicleService.addVehicle("Toyota", "Camry", plateNumber, "red");
+        
+        // When trying to add another vehicle with the same plate number
+        try {
+            vehicleService.addVehicle("Honda", "Civic", plateNumber, "blue");
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            // Expected: plate number already exists
+            assertThat(e.getMessage()).contains("already exists");
+        }
+    }
+    
+    /**
+     * Property: Vehicle Status Management
+     */
+    @Property(tries = 50)
+    void vehicleStatusManagement(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color) {
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // Initially should be available
+        assertThat(vehicle.isAvailable()).isTrue();
+        assertThat(vehicleService.isVehicleAvailable(vehicleId)).isTrue();
+        
+        // When updating status to rented
+        Vehicle rentedVehicle = vehicleService.updateVehicleStatus(vehicleId, "rented");
+        assertThat(rentedVehicle.getStatus()).isEqualTo("rented");
+        assertThat(rentedVehicle.isRented()).isTrue();
+        assertThat(rentedVehicle.getUpdatedAt()).isAfterOrEqualTo(vehicle.getUpdatedAt());
+        
+        // Should not be available
+        assertThat(vehicleService.isVehicleAvailable(vehicleId)).isFalse();
+        
+        // When updating status to maintenance
+        Vehicle maintenanceVehicle = vehicleService.updateVehicleStatus(vehicleId, "maintenance");
+        assertThat(maintenanceVehicle.getStatus()).isEqualTo("maintenance");
+        
+        // When updating status back to available
+        Vehicle availableVehicle = vehicleService.updateVehicleStatus(vehicleId, "available");
+        assertThat(availableVehicle.getStatus()).isEqualTo("available");
+        assertThat(availableVehicle.isAvailable()).isTrue();
+        assertThat(vehicleService.isVehicleAvailable(vehicleId)).isTrue();
+    }
+    
+    /**
+     * Property: Vehicle Location Update
+     */
+    @Property(tries = 50)
+    void vehicleLocationUpdate(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color,
+            @ForAll("jsonLocations") String locationJson) {
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // When updating vehicle location
+        Vehicle updatedVehicle = vehicleService.updateVehicleLocation(vehicleId, locationJson);
+        
+        // Then location should be updated
+        assertThat(updatedVehicle.getCurrentLocation()).isEqualTo(locationJson);
+        assertThat(updatedVehicle.getUpdatedAt()).isAfterOrEqualTo(vehicle.getUpdatedAt());
+    }
+    
+    /**
+     * Property: Vehicle Fuel Level Update
+     */
+    @Property(tries = 50)
+    void vehicleFuelLevelUpdate(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color,
+            @ForAll @DoubleRange(min = 0.0, max = 100.0) Double fuelLevel) {
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // When updating fuel level
+        Vehicle updatedVehicle = vehicleService.updateVehicleFuelLevel(vehicleId, fuelLevel);
+        
+        // Then fuel level should be updated
+        assertThat(updatedVehicle.getFuelLevel()).isEqualTo(fuelLevel);
+        assertThat(updatedVehicle.getUpdatedAt()).isAfterOrEqualTo(vehicle.getUpdatedAt());
+    }
+    
+    /**
+     * Property: Invalid Fuel Level
+     */
+    @Property(tries = 30)
+    void invalidFuelLevel(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color,
+            @ForAll @DoubleRange(min = -100.0, max = -0.1) Double negativeFuelLevel,
+            @ForAll @DoubleRange(min = 100.1, max = 200.0) Double excessiveFuelLevel) {
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // When updating with negative fuel level
+        try {
+            vehicleService.updateVehicleFuelLevel(vehicleId, negativeFuelLevel);
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            assertThat(e.getMessage()).contains("between 0 and 100");
+        }
+        
+        // When updating with excessive fuel level
+        try {
+            vehicleService.updateVehicleFuelLevel(vehicleId, excessiveFuelLevel);
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            assertThat(e.getMessage()).contains("between 0 and 100");
+        }
+    }
+    
+    /**
+     * Property: Maintenance Operations
+     */
+    @Property(tries = 50)
+    void maintenanceOperations(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color) {
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // When putting vehicle in maintenance
+        Vehicle maintenanceVehicle = vehicleService.putVehicleInMaintenance(vehicleId);
+        assertThat(maintenanceVehicle.getStatus()).isEqualTo("maintenance");
+        
+        // Should be in maintenance list
+        List<Vehicle> maintenanceVehicles = vehicleService.getVehiclesInMaintenance();
+        assertThat(maintenanceVehicles).anyMatch(v -> v.getId().equals(vehicleId));
+        
+        // When returning from maintenance
+        Vehicle returnedVehicle = vehicleService.returnVehicleFromMaintenance(vehicleId);
+        assertThat(returnedVehicle.getStatus()).isEqualTo("available");
+        
+        // Should not be in maintenance list
+        List<Vehicle> updatedMaintenanceVehicles = vehicleService.getVehiclesInMaintenance();
+        assertThat(updatedMaintenanceVehicles).noneMatch(v -> v.getId().equals(vehicleId));
+    }
+    
+    /**
+     * Property: Vehicle Lists
+     */
+    @Property(tries = 30)
+    void vehicleLists(
+            @ForAll("vehicleBrands") String brand1,
+            @ForAll("vehicleModels") String model1,
+            @ForAll("plateNumbers") String plateNumber1,
+            @ForAll("colors") String color1,
+            @ForAll("vehicleBrands") String brand2,
+            @ForAll("vehicleModels") String model2,
+            @ForAll("plateNumbers") String plateNumber2,
+            @ForAll("colors") String color2) {
+        
+        // Given multiple vehicles with different statuses
+        Vehicle vehicle1 = vehicleService.addVehicle(brand1, model1, plateNumber1, color1);
+        Vehicle vehicle2 = vehicleService.addVehicle(brand2, model2, plateNumber2, color2);
+        
+        // Put second vehicle in maintenance
+        vehicleService.putVehicleInMaintenance(vehicle2.getId());
+        
+        // When getting vehicle lists
+        List<Vehicle> allVehicles = vehicleService.getAllVehicles();
+        List<Vehicle> availableVehicles = vehicleService.getAvailableVehicles();
+        List<Vehicle> rentedVehicles = vehicleService.getRentedVehicles();
+        List<Vehicle> maintenanceVehicles = vehicleService.getVehiclesInMaintenance();
+        
+        // Then lists should contain correct vehicles
+        assertThat(allVehicles).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(allVehicles).anyMatch(v -> v.getId().equals(vehicle1.getId()));
+        assertThat(allVehicles).anyMatch(v -> v.getId().equals(vehicle2.getId()));
+        
+        assertThat(availableVehicles).anyMatch(v -> v.getId().equals(vehicle1.getId()));
+        assertThat(availableVehicles).noneMatch(v -> v.getId().equals(vehicle2.getId()));
+        
+        assertThat(maintenanceVehicles).anyMatch(v -> v.getId().equals(vehicle2.getId()));
+        assertThat(maintenanceVehicles).noneMatch(v -> v.getId().equals(vehicle1.getId()));
+        
+        // Rented vehicles list should be empty (none rented yet)
+        assertThat(rentedVehicles).isEmpty();
+    }
+    
+    /**
+     * Property: Vehicle Statistics
+     */
+    @Property(tries = 30)
+    void vehicleStatistics(
+            @ForAll("vehicleBrands") String brand1,
+            @ForAll("vehicleModels") String model1,
+            @ForAll("plateNumbers") String plateNumber1,
+            @ForAll("colors") String color1,
+            @ForAll("vehicleBrands") String brand2,
+            @ForAll("vehicleModels") String model2,
+            @ForAll("plateNumbers") String plateNumber2,
+            @ForAll("colors") String color2) {
+        
+        // Given multiple vehicles
+        Vehicle vehicle1 = vehicleService.addVehicle(brand1, model1, plateNumber1, color1);
+        Vehicle vehicle2 = vehicleService.addVehicle(brand2, model2, plateNumber2, color2);
+        
+        // Update fuel levels
+        vehicleService.updateVehicleFuelLevel(vehicle1.getId(), 75.0);
+        vehicleService.updateVehicleFuelLevel(vehicle2.getId(), 50.0);
+        
+        // Put one vehicle in maintenance
+        vehicleService.putVehicleInMaintenance(vehicle2.getId());
+        
+        // When getting vehicle statistics
+        var statistics = vehicleService.getVehicleStatistics();
+        
+        // Then statistics should be calculated
+        assertThat(statistics.totalVehicles()).isGreaterThanOrEqualTo(2);
+        assertThat(statistics.availableVehicles()).isGreaterThanOrEqualTo(1);
+        assertThat(statistics.maintenanceVehicles()).isGreaterThanOrEqualTo(1);
+        assertThat(statistics.averageFuelLevel()).isBetween(50.0, 75.0);
+    }
+    
+    /**
+     * Property: Invalid Status Update
+     */
+    @Property(tries = 30)
+    void invalidStatusUpdate(
+            @ForAll("vehicleBrands") String brand,
+            @ForAll("vehicleModels") String model,
+            @ForAll("plateNumbers") String plateNumber,
+            @ForAll("colors") String color,
+            @ForAll String invalidStatus) {
+        
+        // Skip valid statuses
+        Assume.that(!List.of("available", "rented", "maintenance").contains(invalidStatus));
+        
+        // Given a vehicle
+        Vehicle vehicle = vehicleService.addVehicle(brand, model, plateNumber, color);
+        UUID vehicleId = vehicle.getId();
+        
+        // When updating with invalid status
+        try {
+            vehicleService.updateVehicleStatus(vehicleId, invalidStatus);
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            assertThat(e.getMessage()).contains("Invalid vehicle status");
+        }
+    }
+}

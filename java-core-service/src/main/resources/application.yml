@@ -1,0 +1,29 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/carsharing_db
+    username: postgres
+    password: "1092387456XxXYyYZzZ.,..,..,."
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate # Flyway управляет базой, Hibernate только проверяет соответствие сущностям
+    show-sql: true # Будет выводить SQL-запросы Java в консоль для наглядности
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true # Полезно, если база уже частично существовала
+    repair-on-migrate: true # Исправить контрольные суммы при несоответствии
+    validate-on-migrate: false # Отключить валидацию контрольных сумм
+
+  # Настройки Actuator для мониторинга и health checks
+  management:
+    endpoints:
+      web:
+        exposure:
+          include: health,info,metrics
+    endpoint:
+      health:
+        show-details: when-authorized
+        probes:
+          enabled: true

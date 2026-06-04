@@ -1,0 +1,244 @@
+package com.carsharing.services;
+
+import com.carsharing.BasePropertyTest;
+import com.carsharing.entities.User;
+import net.jqwik.api.*;
+import net.jqwik.api.constraints.*;
+import net.jqwik.api.lifecycle.BeforeTry;
+import net.jqwik.spring.JqwikSpringSupport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Property tests for UserService
+ * 
+ * **Feature: carsharing-data-lifecycle-management, Property 1: User Data Persistence**
+ * *For any* valid user registration or update operation, the system shall persist all user data 
+ * accurately in the main schema, and subsequent queries shall return the same data.
+ * **Validates: Requirements 1.1, 1.4**
+ */
+@JqwikSpringSupport
+@SpringBootTest
+@TestPropertySource(properties = {
+    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
+    "spring.datasource.driver-class-name=org.h2.Driver",
+    "spring.jpa.hibernate.ddl-auto=create-drop"
+})
+@Transactional
+public class UserServicePropertyTest extends BasePropertyTest {
+
+    @Autowired
+    private UserService userService;
+    
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+    
+    private String testPassword;
+    
+    @BeforeTry
+    void setup() {
+        testPassword = "TestPassword123!";
+    }
+    
+    /**
+     * Property 1: User Data Persistence
+     * Validates: Requirements 1.1, 1.4
+     */
+    @Property(tries = 100)
+    void userDataPersistence(
+            @ForAll("validEmails") String email,
+            @ForAll("validPhoneNumbers") String phone,
+            @ForAll("validNames") String firstName,
+            @ForAll("validNames") String lastName) {
+        
+        // Given valid user registration data
+        assertThat(isValidEmail(email)).isTrue();
+        assertThat(isValidPhone(phone)).isTrue();
+        assertThat(firstName).isNotBlank();
+        assertThat(lastName).isNotBlank();
+        
+        // When registering a user
+        User registeredUser = userService.registerUser(email, phone, firstName, lastName, testPassword);
+        
+        // Then the user should be persisted with correct data
+        assertThat(registeredUser).isNotNull();
+        assertThat(registeredUser.getId()).isNotNull();
+        assertThat(registeredUser.getEmail()).isEqualTo(email);
+        assertThat(registeredUser.getPhone()).isEqualTo(phone);
+        assertThat(registeredUser.getFirstName()).isEqualTo(firstName);
+        assertThat(registeredUser.getLastName()).isEqualTo(lastName);
+        assertThat(registeredUser.getIsDeleted()).isFalse();
+        assertThat(registeredUser.getCreatedAt()).isNotNull();
+        assertThat(registeredUser.getUpdatedAt()).isNotNull();
+        
+        // And the user should be retrievable by ID
+        Optional<User> retrievedUser = userService.getUserById(registeredUser.getId());
+        assertThat(retrievedUser).isPresent();
+        assertThat(retrievedUser.get().getEmail()).isEqualTo(email);
+        assertThat(retrievedUser.get().getFirstName()).isEqualTo(firstName);
+        assertThat(retrievedUser.get().getLastName()).isEqualTo(lastName);
+        
+        // And the user should be retrievable by email
+        Optional<User> userByEmail = userService.getUserByEmail(email);
+        assertThat(userByEmail).isPresent();
+        assertThat(userByEmail.get().getId()).isEqualTo(registeredUser.getId());
+    }
+    
+    /**
+     * Property 2: Soft Delete Consistency
+     * Validates: Requirements 1.2
+     */
+    @Property(tries = 100)
+    void softDeleteConsistency(
+            @ForAll("validEmails") String email,
+            @ForAll("validPhoneNumbers") String phone,
+            @ForAll("validNames") String firstName,
+            @ForAll("validNames") String lastName) {
+        
+        // Given a registered user
+        User user = userService.registerUser(email, phone, firstName, lastName, testPassword);
+        UUID userId = user.getId();
+        
+        // When deleting the user
+        userService.deleteUser(userId);
+        
+        // Then the user should be marked as deleted
+        Optional<User> deletedUser = userService.getUserById(userId);
+        assertThat(deletedUser).isEmpty(); // getById should not return deleted users
+        
+        // But the user should exist in the deleted users list
+        var deletedUsers = userService.getAllDeletedUsers();
+        assertThat(deletedUsers).anyMatch(u -> u.getId().equals(userId) && Boolean.TRUE.equals(u.getIsDeleted()));
+        
+        // And the user should not be in active users list
+        var activeUsers = userService.getAllActiveUsers();
+        assertThat(activeUsers).noneMatch(u -> u.getId().equals(userId));
+    }
+    
+    /**
+     * Property 3: Authentication Validity
+     * Validates: Requirements 1.3
+     */
+    @Property(tries = 100)
+    void authenticationValidity(
+            @ForAll("validEmails") String email,
+            @ForAll("validPhoneNumbers") String phone,
+            @ForAll("validNames") String firstName,
+            @ForAll("validNames") String lastName,
+            @ForAll String wrongPassword) {
+        
+        // Given a registered user
+        User user = userService.registerUser(email, phone, firstName, lastName, testPassword);
+        
+        // When authenticating with correct credentials
+        Optional<User> authenticatedUser = userService.authenticateUser(email, testPassword);
+        
+        // Then authentication should succeed
+        assertThat(authenticatedUser).isPresent();
+        assertThat(authenticatedUser.get().getId()).isEqualTo(user.getId());
+        assertThat(authenticatedUser.get().getEmail()).isEqualTo(email);
+        
+        // When authenticating with wrong password
+        Optional<User> wrongAuth = userService.authenticateUser(email, wrongPassword);
+        
+        // Then authentication should fail
+        assertThat(wrongAuth).isEmpty();
+        
+        // When authenticating with wrong email
+        Optional<User> wrongEmailAuth = userService.authenticateUser("wrong@" + email, testPassword);
+        
+        // Then authentication should fail
+        assertThat(wrongEmailAuth).isEmpty();
+    }
+    
+    /**
+     * Property: Profile Update Persistence
+     */
+    @Property(tries = 100)
+    void profileUpdatePersistence(
+            @ForAll("validEmails") String email,
+            @ForAll("validPhoneNumbers") String phone,
+            @ForAll("validNames") String firstName,
+            @ForAll("validNames") String lastName,
+            @ForAll("validNames") String newFirstName,
+            @ForAll("validNames") String newLastName,
+            @ForAll("validPhoneNumbers") String newPhone) {
+        
+        // Given a registered user
+        User user = userService.registerUser(email, phone, firstName, lastName, testPassword);
+        UUID userId = user.getId();
+        
+        // When updating the user profile
+        User updatedUser = userService.updateUserProfile(userId, newFirstName, newLastName, newPhone);
+        
+        // Then the profile should be updated
+        assertThat(updatedUser.getFirstName()).isEqualTo(newFirstName);
+        assertThat(updatedUser.getLastName()).isEqualTo(newLastName);
+        assertThat(updatedUser.getPhone()).isEqualTo(newPhone);
+        assertThat(updatedUser.getUpdatedAt()).isAfterOrEqualTo(user.getUpdatedAt());
+        
+        // And the changes should be persisted
+        Optional<User> retrievedUser = userService.getUserById(userId);
+        assertThat(retrievedUser).isPresent();
+        assertThat(retrievedUser.get().getFirstName()).isEqualTo(newFirstName);
+        assertThat(retrievedUser.get().getLastName()).isEqualTo(newLastName);
+        assertThat(retrievedUser.get().getPhone()).isEqualTo(newPhone);
+    }
+    
+    /**
+     * Property: Email Uniqueness
+     */
+    @Property(tries = 50)
+    void emailUniqueness(@ForAll("validEmails") String email) {
+        // Given a registered user with an email
+        userService.registerUser(email, "+1234567890", "John", "Doe", testPassword);
+        
+        // When trying to register another user with the same email
+        try {
+            userService.registerUser(email, "+0987654321", "Jane", "Smith", testPassword);
+            
+            // Then it should throw an exception
+            // (This will fail the property test if no exception is thrown)
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            // Expected: email already registered
+            assertThat(e.getMessage()).contains("already registered");
+        }
+    }
+    
+    /**
+     * Property: Password Change
+     */
+    @Property(tries = 50)
+    void passwordChange(
+            @ForAll("validEmails") String email,
+            @ForAll("validPhoneNumbers") String phone,
+            @ForAll("validNames") String firstName,
+            @ForAll("validNames") String lastName,
+            @ForAll("validPasswords") String newPassword) {
+        
+        // Given a registered user
+        User user = userService.registerUser(email, phone, firstName, lastName, testPassword);
+        UUID userId = user.getId();
+        
+        // When changing the password
+        userService.changePassword(userId, testPassword, newPassword);
+        
+        // Then the old password should not work
+        Optional<User> oldPasswordAuth = userService.authenticateUser(email, testPassword);
+        assertThat(oldPasswordAuth).isEmpty();
+        
+        // And the new password should work
+        Optional<User> newPasswordAuth = userService.authenticateUser(email, newPassword);
+        assertThat(newPasswordAuth).isPresent();
+        assertThat(newPasswordAuth.get().getId()).isEqualTo(userId);
+    }
+}

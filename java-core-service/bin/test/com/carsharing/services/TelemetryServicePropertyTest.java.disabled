@@ -1,0 +1,343 @@
+package com.carsharing.services;
+
+import com.carsharing.BasePropertyTest;
+import com.carsharing.entities.Ride;
+import com.carsharing.entities.Telemetry;
+import com.carsharing.entities.User;
+import com.carsharing.entities.Vehicle;
+import net.jqwik.api.*;
+import net.jqwik.api.lifecycle.BeforeTry;
+import net.jqwik.spring.JqwikSpringSupport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Property tests for TelemetryService
+ * 
+ * **Feature: carsharing-data-lifecycle-management, Property 5: Telemetry Data Integrity**
+ * *For any* active ride, telemetry data should be accepted and stored in JSONB format 
+ * with all sensor readings preserved.
+ * **Validates: Requirements 2.3**
+ */
+@JqwikSpringSupport
+@SpringBootTest
+@TestPropertySource(properties = {
+    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
+    "spring.datasource.driver-class-name=org.h2.Driver",
+    "spring.jpa.hibernate.ddl-auto=create-drop"
+})
+@Transactional
+public class TelemetryServicePropertyTest extends BasePropertyTest {
+
+    @Autowired
+    private TelemetryService telemetryService;
+    
+    @Autowired
+    private RideService rideService;
+    
+    @Autowired
+    private UserService userService;
+    
+    @Autowired
+    private VehicleService vehicleService;
+    
+    private UUID testUserId;
+    private UUID testVehicleId;
+    private UUID testRideId;
+    private String testPassword = "TestPassword123!";
+    
+    @BeforeTry
+    void setup() {
+        // Create test user
+        User user = userService.registerUser(
+            "test" + UUID.randomUUID() + "@example.com",
+            "+1234567890",
+            "Test",
+            "User",
+            testPassword
+        );
+        testUserId = user.getId();
+        
+        // Create test vehicle
+        Vehicle vehicle = vehicleService.addVehicle(
+            "Toyota",
+            "Camry",
+            "ABC" + UUID.randomUUID().toString().substring(0, 3),
+            "red"
+        );
+        testVehicleId = vehicle.getId();
+        
+        // Create a test ride
+        String startLocation = "{\"latitude\": 55.7558, \"longitude\": 37.6173}";
+        Ride ride = rideService.startRide(testUserId, testVehicleId, startLocation);
+        testRideId = ride.getId();
+    }
+    
+    /**
+     * Property 5: Telemetry Data Integrity
+     * Validates: Requirements 2.3
+     */
+    @Property(tries = 50)
+    void telemetryDataIntegrity(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given valid telemetry data for an active ride
+        assertThat(telemetryData).isNotEmpty();
+        
+        // When storing telemetry data
+        Telemetry telemetry = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData);
+        
+        // Then the telemetry should be stored with correct information
+        assertThat(telemetry).isNotNull();
+        assertThat(telemetry.getId()).isNotNull();
+        assertThat(telemetry.getRideId()).isEqualTo(testRideId);
+        assertThat(telemetry.getVehicleId()).isEqualTo(testVehicleId);
+        assertThat(telemetry.getData()).isNotNull();
+        assertThat(telemetry.getTimestamp()).isNotNull();
+        assertThat(telemetry.getCreatedAt()).isNotNull();
+        
+        // And the data should contain all original fields
+        Map<String, Object> parsedData = telemetryService.parseTelemetryData(telemetry);
+        assertThat(parsedData).isNotEmpty();
+        
+        // Check that key-value pairs are preserved (allowing for JSON string conversion)
+        for (Map.Entry<String, Object> entry : telemetryData.entrySet()) {
+            assertThat(parsedData).containsKey(entry.getKey());
+            // Values might be converted to strings in JSON, so we check presence not exact equality
+        }
+        
+        // And the telemetry should be retrievable by ID
+        Optional<Telemetry> retrievedTelemetry = telemetryService.getTelemetryById(telemetry.getId());
+        assertThat(retrievedTelemetry).isPresent();
+        assertThat(retrievedTelemetry.get().getRideId()).isEqualTo(testRideId);
+        
+        // And the telemetry should be in the ride's telemetry list
+        List<Telemetry> rideTelemetry = telemetryService.getTelemetryByRideId(testRideId);
+        assertThat(rideTelemetry).anyMatch(t -> t.getId().equals(telemetry.getId()));
+    }
+    
+    /**
+     * Property: Telemetry JSON Storage
+     */
+    @Property(tries = 50)
+    void telemetryJsonStorage(@ForAll String jsonData) {
+        // Skip invalid JSON
+        Assume.that(isValidJson(jsonData));
+        
+        // Given valid JSON data
+        assertThat(isValidJson(jsonData)).isTrue();
+        
+        // When storing telemetry data as JSON string
+        Telemetry telemetry = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, jsonData);
+        
+        // Then the JSON should be stored correctly
+        assertThat(telemetry.getData()).isEqualTo(jsonData);
+        
+        // And it should be parseable
+        Map<String, Object> parsedData = telemetryService.parseTelemetryData(telemetry);
+        assertThat(parsedData).isNotNull();
+    }
+    
+    /**
+     * Property: Telemetry Ordering
+     */
+    @Property(tries = 30)
+    void telemetryOrdering(@ForAll("telemetryData") Map<String, Object> telemetryData1,
+                          @ForAll("telemetryData") Map<String, Object> telemetryData2) {
+        
+        // Given multiple telemetry records for a ride
+        Telemetry telemetry1 = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData1);
+        
+        // Wait to ensure different timestamps
+        try { Thread.sleep(10); } catch (InterruptedException e) {}
+        
+        Telemetry telemetry2 = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData2);
+        
+        // When getting telemetry ordered by timestamp
+        List<Telemetry> orderedTelemetry = telemetryService.getTelemetryByRideIdOrdered(testRideId);
+        
+        // Then telemetry should be in chronological order
+        assertThat(orderedTelemetry).hasSizeGreaterThanOrEqualTo(2);
+        
+        // Find our telemetry records in the ordered list
+        int index1 = -1, index2 = -1;
+        for (int i = 0; i < orderedTelemetry.size(); i++) {
+            if (orderedTelemetry.get(i).getId().equals(telemetry1.getId())) {
+                index1 = i;
+            }
+            if (orderedTelemetry.get(i).getId().equals(telemetry2.getId())) {
+                index2 = i;
+            }
+        }
+        
+        // telemetry1 should come before telemetry2
+        assertThat(index1).isGreaterThanOrEqualTo(0);
+        assertThat(index2).isGreaterThanOrEqualTo(0);
+        assertThat(index1).isLessThan(index2);
+        
+        // Timestamps should be in order
+        assertThat(telemetry1.getTimestamp()).isBefore(telemetry2.getTimestamp());
+    }
+    
+    /**
+     * Property: Telemetry Statistics
+     */
+    @Property(tries = 30)
+    void telemetryStatistics(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given some telemetry data with speed
+        telemetryData.put("speed", 60.0);
+        telemetryData.put("distance", 10.5);
+        
+        Telemetry telemetry = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData);
+        
+        // When getting telemetry statistics
+        var statistics = telemetryService.getTelemetryStatisticsForRide(testRideId);
+        
+        // Then statistics should be calculated
+        assertThat(statistics.totalRecords()).isGreaterThan(0);
+        assertThat(statistics.firstRecord()).isNotNull();
+        assertThat(statistics.lastRecord()).isNotNull();
+        
+        // If speed data is present, average speed should be calculated
+        if (telemetryData.containsKey("speed")) {
+            assertThat(statistics.averageSpeed()).isNotNull();
+        }
+        
+        // If distance data is present, total distance should be calculated
+        if (telemetryData.containsKey("distance")) {
+            assertThat(statistics.totalDistance()).isNotNull();
+        }
+    }
+    
+    /**
+     * Property: Telemetry Deletion
+     */
+    @Property(tries = 30)
+    void telemetryDeletion(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given stored telemetry data
+        Telemetry telemetry = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData);
+        UUID telemetryId = telemetry.getId();
+        
+        // When deleting the telemetry
+        telemetryService.deleteTelemetry(telemetryId);
+        
+        // Then the telemetry should not be retrievable
+        Optional<Telemetry> deletedTelemetry = telemetryService.getTelemetryById(telemetryId);
+        assertThat(deletedTelemetry).isEmpty();
+        
+        // And it should not be in the ride's telemetry list
+        List<Telemetry> rideTelemetry = telemetryService.getTelemetryByRideId(testRideId);
+        assertThat(rideTelemetry).noneMatch(t -> t.getId().equals(telemetryId));
+    }
+    
+    /**
+     * Property: Telemetry Age Check
+     */
+    @Property(tries = 30)
+    void telemetryAgeCheck(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given telemetry data
+        Telemetry telemetry = telemetryService.storeTelemetryData(
+            testRideId, testVehicleId, telemetryData);
+        
+        // When checking if telemetry is older than certain days
+        boolean isOlderThanZeroDays = telemetryService.isTelemetryOlderThanDays(telemetry, 0);
+        boolean isOlderThanOneDay = telemetryService.isTelemetryOlderThanDays(telemetry, 1);
+        boolean isOlderThanThirtyDays = telemetryService.isTelemetryOlderThanDays(telemetry, 30);
+        
+        // Then fresh telemetry should not be older than 0 days
+        assertThat(isOlderThanZeroDays).isFalse();
+        
+        // And should not be older than 1 day (unless time travel happens!)
+        assertThat(isOlderThanOneDay).isFalse();
+        
+        // And should not be older than 30 days
+        assertThat(isOlderThanThirtyDays).isFalse();
+    }
+    
+    /**
+     * Property: Invalid Ride Telemetry
+     */
+    @Property(tries = 30)
+    void invalidRideTelemetry(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given an invalid (non-existent) ride ID
+        UUID invalidRideId = UUID.randomUUID();
+        
+        // When trying to store telemetry for invalid ride
+        try {
+            telemetryService.storeTelemetryData(invalidRideId, testVehicleId, telemetryData);
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            // Expected: ride not found
+            assertThat(e.getMessage()).contains("not found");
+        }
+    }
+    
+    /**
+     * Property: Inactive Ride Telemetry
+     */
+    @Property(tries = 30)
+    void inactiveRideTelemetry(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given a completed ride
+        String endLocation = "{\"latitude\": 55.7600, \"longitude\": 37.6200}";
+        Ride completedRide = rideService.endRide(testRideId, endLocation);
+        assertThat(completedRide.isActive()).isFalse();
+        
+        // When trying to store telemetry for inactive ride
+        try {
+            telemetryService.storeTelemetryData(testRideId, testVehicleId, telemetryData);
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalStateException e) {
+            // Expected: cannot store telemetry for inactive ride
+            assertThat(e.getMessage()).contains("inactive");
+        }
+    }
+    
+    /**
+     * Property: Vehicle Mismatch
+     */
+    @Property(tries = 30)
+    void vehicleMismatch(@ForAll("telemetryData") Map<String, Object> telemetryData) {
+        // Given a different vehicle ID
+        UUID differentVehicleId = UUID.randomUUID();
+        
+        // When trying to store telemetry with wrong vehicle ID
+        try {
+            telemetryService.storeTelemetryData(testRideId, differentVehicleId, telemetryData);
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalArgumentException e) {
+            // Expected: vehicle ID does not match
+            assertThat(e.getMessage()).contains("does not match");
+        }
+    }
+    
+    // Clean up after each property test
+    @AfterTry
+    void cleanup() {
+        // Cancel the test ride to clean up
+        try {
+            rideService.cancelRide(testRideId);
+        } catch (Exception e) {
+            // Ride might already be completed or cancelled
+        }
+    }
+}

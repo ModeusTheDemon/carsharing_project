@@ -1,0 +1,24 @@
+{
+  "telemetry_policy": {
+    "cleanup_after_days": 15
+  },
+  "rides_policy": {
+    "archive_after_days": 90
+  },
+  "users_policy": {
+    "anonymize_immediately": true
+  },
+  "payments_policy": {
+    "preserve_for_years": 5
+  },
+  "scheduling": {
+    "archiver_cron": "0 0 * * *",
+    "anonymizer_cron": "0 * * * *",
+    "cleaner_cron": "0 2 * * 0"
+  },
+  "error_handling": {
+    "max_retries": 3,
+    "retry_delay_seconds": 60,
+    "exponential_backoff": true
+  }
+}

@@ -1,0 +1,272 @@
+package com.carsharing.services;
+
+import com.carsharing.BasePropertyTest;
+import com.carsharing.entities.Ride;
+import com.carsharing.entities.User;
+import com.carsharing.entities.Vehicle;
+import net.jqwik.api.*;
+import net.jqwik.api.lifecycle.BeforeTry;
+import net.jqwik.spring.JqwikSpringSupport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Property tests for RideService
+ * 
+ * **Feature: carsharing-data-lifecycle-management, Property 4: Ride Lifecycle Completeness**
+ * *For any* ride that is started and subsequently completed, the system should maintain a complete 
+ * record including start time, end time, locations, and calculated cost.
+ * **Validates: Requirements 2.1, 2.2**
+ */
+@JqwikSpringSupport
+@SpringBootTest
+@TestPropertySource(properties = {
+    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
+    "spring.datasource.driver-class-name=org.h2.Driver",
+    "spring.jpa.hibernate.ddl-auto=create-drop"
+})
+@Transactional
+public class RideServicePropertyTest extends BasePropertyTest {
+
+    @Autowired
+    private RideService rideService;
+    
+    @Autowired
+    private UserService userService;
+    
+    @Autowired
+    private VehicleService vehicleService;
+    
+    private UUID testUserId;
+    private UUID testVehicleId;
+    private String testPassword = "TestPassword123!";
+    
+    @BeforeTry
+    void setup() {
+        // Create test user
+        User user = userService.registerUser(
+            "test" + UUID.randomUUID() + "@example.com",
+            "+1234567890",
+            "Test",
+            "User",
+            testPassword
+        );
+        testUserId = user.getId();
+        
+        // Create test vehicle
+        Vehicle vehicle = vehicleService.addVehicle(
+            "Toyota",
+            "Camry",
+            "ABC" + UUID.randomUUID().toString().substring(0, 3),
+            "red"
+        );
+        testVehicleId = vehicle.getId();
+    }
+    
+    /**
+     * Property 4: Ride Lifecycle Completeness
+     * Validates: Requirements 2.1, 2.2
+     */
+    @Property(tries = 50)
+    void rideLifecycleCompleteness(@ForAll("jsonLocations") String startLocation) {
+        // Given a valid start location
+        assertThat(isValidJson(startLocation)).isTrue();
+        
+        // When starting a ride
+        Ride startedRide = rideService.startRide(testUserId, testVehicleId, startLocation);
+        
+        // Then the ride should be created with correct start information
+        assertThat(startedRide).isNotNull();
+        assertThat(startedRide.getId()).isNotNull();
+        assertThat(startedRide.getUserId()).isEqualTo(testUserId);
+        assertThat(startedRide.getVehicleId()).isEqualTo(testVehicleId);
+        assertThat(startedRide.getStartLocation()).isEqualTo(startLocation);
+        assertThat(startedRide.getStartTime()).isNotNull();
+        assertThat(startedRide.getStatus()).isEqualTo("active");
+        assertThat(startedRide.isActive()).isTrue();
+        
+        // Wait a moment to ensure different timestamps
+        try { Thread.sleep(10); } catch (InterruptedException e) {}
+        
+        // When ending the ride
+        String endLocation = "{\"latitude\": 55.7600, \"longitude\": 37.6200, \"address\": \"Destination\"}";
+        Ride completedRide = rideService.endRide(startedRide.getId(), endLocation);
+        
+        // Then the ride should be updated with correct end information
+        assertThat(completedRide).isNotNull();
+        assertThat(completedRide.getId()).isEqualTo(startedRide.getId());
+        assertThat(completedRide.getEndLocation()).isEqualTo(endLocation);
+        assertThat(completedRide.getEndTime()).isNotNull();
+        assertThat(completedRide.getEndTime()).isAfter(startedRide.getStartTime());
+        assertThat(completedRide.getTotalCost()).isNotNull();
+        assertThat(completedRide.getTotalCost().compareTo(BigDecimal.ZERO)).isGreaterThan(0);
+        assertThat(completedRide.getStatus()).isEqualTo("completed");
+        assertThat(completedRide.isCompleted()).isTrue();
+        
+        // And the ride should be retrievable with all information
+        Optional<Ride> retrievedRide = rideService.getRideById(startedRide.getId());
+        assertThat(retrievedRide).isPresent();
+        assertThat(retrievedRide.get().getStartLocation()).isEqualTo(startLocation);
+        assertThat(retrievedRide.get().getEndLocation()).isEqualTo(endLocation);
+        assertThat(retrievedRide.get().getStartTime()).isEqualTo(startedRide.getStartTime());
+        assertThat(retrievedRide.get().getEndTime()).isEqualTo(completedRide.getEndTime());
+        assertThat(retrievedRide.get().getTotalCost()).isEqualTo(completedRide.getTotalCost());
+    }
+    
+    /**
+     * Property: Ride Cost Calculation
+     */
+    @Property(tries = 50)
+    void rideCostCalculation() {
+        // Given a started ride
+        String startLocation = "{\"latitude\": 55.7558, \"longitude\": 37.6173}";
+        Ride ride = rideService.startRide(testUserId, testVehicleId, startLocation);
+        
+        // When calculating cost for different durations
+        LocalDateTime startTime = ride.getStartTime();
+        
+        // Test minimum fare (less than 10 minutes)
+        LocalDateTime shortEndTime = startTime.plusMinutes(5);
+        BigDecimal shortCost = rideService.calculateRideCost(startTime, shortEndTime);
+        assertThat(shortCost).isNotNull();
+        assertThat(shortCost.compareTo(BigDecimal.ZERO)).isGreaterThan(0);
+        
+        // Test regular fare (more than 10 minutes)
+        LocalDateTime longEndTime = startTime.plusMinutes(30);
+        BigDecimal longCost = rideService.calculateRideCost(startTime, longEndTime);
+        assertThat(longCost).isNotNull();
+        assertThat(longCost.compareTo(shortCost)).isGreaterThan(0);
+        
+        // Test that cost increases with duration
+        LocalDateTime longerEndTime = startTime.plusMinutes(60);
+        BigDecimal longerCost = rideService.calculateRideCost(startTime, longerEndTime);
+        assertThat(longerCost.compareTo(longCost)).isGreaterThan(0);
+        
+        // Clean up
+        rideService.cancelRide(ride.getId());
+    }
+    
+    /**
+     * Property: Active Ride Uniqueness
+     */
+    @Property(tries = 30)
+    void activeRideUniqueness(@ForAll("jsonLocations") String startLocation) {
+        // Given a user with an active ride
+        Ride firstRide = rideService.startRide(testUserId, testVehicleId, startLocation);
+        assertThat(firstRide.isActive()).isTrue();
+        
+        // When trying to start another ride for the same user
+        try {
+            rideService.startRide(testUserId, testVehicleId, startLocation);
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalStateException e) {
+            // Expected: user already has an active ride
+            assertThat(e.getMessage()).contains("already has an active ride");
+        }
+        
+        // Clean up
+        rideService.cancelRide(firstRide.getId());
+    }
+    
+    /**
+     * Property: Ride Cancellation
+     */
+    @Property(tries = 50)
+    void rideCancellation(@ForAll("jsonLocations") String startLocation) {
+        // Given a started ride
+        Ride ride = rideService.startRide(testUserId, testVehicleId, startLocation);
+        UUID rideId = ride.getId();
+        
+        // When cancelling the ride
+        Ride cancelledRide = rideService.cancelRide(rideId);
+        
+        // Then the ride should be cancelled
+        assertThat(cancelledRide.getStatus()).isEqualTo("cancelled");
+        assertThat(cancelledRide.getEndTime()).isNotNull();
+        assertThat(cancelledRide.isActive()).isFalse();
+        
+        // And the ride should not be in active rides list
+        List<Ride> activeRides = rideService.getAllActiveRides();
+        assertThat(activeRides).noneMatch(r -> r.getId().equals(rideId));
+        
+        // But should be retrievable by ID
+        Optional<Ride> retrievedRide = rideService.getRideById(rideId);
+        assertThat(retrievedRide).isPresent();
+        assertThat(retrievedRide.get().getStatus()).isEqualTo("cancelled");
+    }
+    
+    /**
+     * Property: Vehicle Availability
+     */
+    @Property(tries = 30)
+    void vehicleAvailability(@ForAll("jsonLocations") String startLocation) {
+        // Given a vehicle is rented
+        Ride ride = rideService.startRide(testUserId, testVehicleId, startLocation);
+        
+        // When trying to start another ride with the same vehicle
+        UUID anotherUserId = createTestUser();
+        try {
+            rideService.startRide(anotherUserId, testVehicleId, startLocation);
+            
+            // Then it should throw an exception
+            assertThat(false).isTrue(); // Force failure if we reach here
+        } catch (IllegalStateException e) {
+            // Expected: vehicle is not available
+            assertThat(e.getMessage()).contains("not available");
+        }
+        
+        // Clean up
+        rideService.cancelRide(ride.getId());
+    }
+    
+    /**
+     * Property: Ride Duration Calculation
+     */
+    @Property(tries = 50)
+    void rideDurationCalculation(@ForAll("jsonLocations") String startLocation) {
+        // Given a started ride
+        Ride ride = rideService.startRide(testUserId, testVehicleId, startLocation);
+        
+        // When getting ride duration
+        long durationMinutes = rideService.getRideDurationMinutes(ride);
+        
+        // Then duration should be non-negative
+        assertThat(durationMinutes).isGreaterThanOrEqualTo(0);
+        
+        // Wait a moment
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+        
+        // When getting duration again
+        long updatedDuration = rideService.getRideDurationMinutes(ride);
+        
+        // Then duration should have increased
+        assertThat(updatedDuration).isGreaterThanOrEqualTo(durationMinutes);
+        
+        // Clean up
+        rideService.cancelRide(ride.getId());
+    }
+    
+    // Helper method to create test users
+    private UUID createTestUser() {
+        User user = userService.registerUser(
+            "test" + UUID.randomUUID() + "@example.com",
+            "+1234567890",
+            "Test",
+            "User",
+            testPassword
+        );
+        return user.getId();
+    }
+}

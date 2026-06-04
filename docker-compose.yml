@@ -1,0 +1,116 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: carsharing-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=1092387456XxXYyYZzZ.,..,..,.
+      - POSTGRES_DB=carsharing_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d carsharing_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Java Core Service
+  java-core-service:
+    build:
+      context: ./java-core-service
+      dockerfile: Dockerfile
+    container_name: carsharing-java-core
+    ports:
+      - "8080:8080"
+      - "8081:8081"  # Actuator endpoints
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/carsharing_db
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=1092387456XxXYyYZzZ.,..,..,.
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=validate
+      - SPRING_APPLICATION_JSON={"server":{"port":8080},"management":{"endpoints":{"web":{"exposure":{"include":"health,info,metrics"}}},"endpoint":{"health":{"show-details":"always"}}}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis (for Celery)
+  dlm-redis:
+    image: redis:7-alpine
+    container_name: carsharing-dlm-redis
+    ports:
+      - "6379:6379"
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Python DLM Worker (Celery)
+  celery-worker:
+    build:
+      context: ./python-dlm-worker
+      dockerfile: Dockerfile
+    container_name: carsharing-celery-worker
+    command: celery -A main.app worker --loglevel=info
+    environment:
+      - REDIS_URL=redis://dlm-redis:6379/0
+      - DATABASE_URL=postgresql+psycopg2://postgres:1092387456XxXYyYZzZ.,..,..,.@postgres:5432/carsharing_db
+    depends_on:
+      - dlm-redis
+      - java-core-service
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Python DLM Worker (Celery Beat - scheduler)
+  celery-beat:
+    build:
+      context: ./python-dlm-worker
+      dockerfile: Dockerfile
+    container_name: carsharing-celery-beat
+    command: celery -A main.app beat --loglevel=info
+    environment:
+      - REDIS_URL=redis://dlm-redis:6379/0
+    depends_on:
+      - dlm-redis
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:
