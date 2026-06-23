@@ -1,76 +1,153 @@
 import logging
-import uuid
-from datetime import datetime, timezone
-from database.session import get_db
-from database.models import MainUser, MainRide
-from policies.rules_engine import RetentionRulesEngine
+import os
+import shutil
+import tarfile
+import traceback
+from typing import List, Tuple
+import psutil
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
-def run_anonymizer():
-    logger.info("Starting Anonymizer Job: Anonymizing deleted user data...")
+def get_all_disks() -> List[str]:
+    """Сканирует систему и возвращает пути ко всем доступным дискам."""
+    logger.info("Scaning discs for any backups...")
+    disks: List[str] = []
+    try:
+        for part in psutil.disk_partitions(all=False):
+            if os.name == "nt" and "cdrom" in part.opts:
+                continue
+            if os.path.exists(part.mountpoint):
+                disks.append(part.mountpoint)
+    except Exception as e:
+        logger.error(f"Error occured while scaning file system: {e}")
+    return disks
 
-    rules_engine = RetentionRulesEngine()
+
+def find_latest_backups() -> Tuple[str, str]:
+    """Находит на дисках самый свежий полный бэкап и последний инкремент к нему."""
+    disks = get_all_disks()
+    full_backups = []
+    incr_backups = []
+
+    for disk in disks:
+        full_dir = os.path.join(disk, "db_physical_full_backups")
+        incr_dir = os.path.join(disk, "db_physical_incremental_backups")
+
+        if os.path.exists(full_dir):
+            for d in os.listdir(full_dir):
+                full_backups.append(os.path.join(full_dir, d))
+        
+        if os.path.exists(incr_dir):
+            for d in os.listdir(incr_dir):
+                incr_backups.append(os.path.join(incr_dir, d))
+
+    if not full_backups:
+        raise FileNotFoundError("CRITICAL ERROR: not found any full physical copies!")
+
+    # Сортируем по времени изменения папки (выбираем самый свежий)
+    latest_full = max(full_backups, key=os.path.getmtime)
+    logger.info(f"Found base full copy: {latest_full}")
+    
+    # Ищем инкремент, который был сделан строго после этого полного бэкапа
+    latest_incr = None
+    if incr_backups:
+        valid_incrs = [i for i in incr_backups if os.path.getmtime(i) > os.path.getmtime(latest_full)]
+        if valid_incrs:
+            latest_incr = max(valid_incrs, key=os.path.getmtime)
+            logger.info(f"Found latest weekly increment: {latest_incr}")
+
+    return latest_full, latest_incr
+
+
+def run_backuper():
+    """Главная аварийная джоба восстановления СУБД PostgreSQL 17."""
+    logger.info("=======================================================")
+    logger.critical("ATTENTION: BACKUP SYSTEM IS ACTIVE")
+    logger.info("=======================================================")
+
+    # Путь к папке данных PostgreSQL внутри контейнера воркера.
+    # Этот путь должен смотреть на упавший том (volume) СУБД.
+    TARGET_PG_DATA_DIR = os.getenv("TARGET_PG_DATA_DIR", "/var/lib/postgresql/data")
 
     try:
-        with get_db() as db:
-            users_to_anonymize = db.query(MainUser).filter(
-                MainUser.is_deleted == True
-            ).all()
+        # Поиск уцелевших файлов бэкапа
+        full_backup_path, incr_backup_path = find_latest_backups()
+        
+        # Полная очистка поврежденного/упавшего каталога данных
+        logger.warning(f"Clearing damaged data catalogue: {TARGET_PG_DATA_DIR}")
+        if os.path.exists(TARGET_PG_DATA_DIR):
+            for item in os.listdir(TARGET_PG_DATA_DIR):
+                item_path = os.path.join(TARGET_PG_DATA_DIR, item)
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                except Exception as clean_err:
+                    logger.warning(f"Can not delete this directory/file {item}: {clean_err}. Is it blocked?.")
+        else:
+            os.makedirs(TARGET_PG_DATA_DIR, exist_ok=True)
 
-            if not users_to_anonymize:
-                logger.info("No deleted users found for anonymization.")
-                return
+        # Распаковка ПОЛНОГО физического бэкапа
+        base_tar = os.path.join(full_backup_path, "base.tar.gz")
+        logger.info(f"Unpacking base DBMS file structure ({base_tar})...")
+        with tarfile.open(base_tar, "r:gz") as tar:
+            tar.extractall(path=TARGET_PG_DATA_DIR)
 
-            logger.info(f"Found {len(users_to_anonymize)} deleted users to anonymize.")
+        # Накат ИНКРЕМЕНТАЛЬНОГО бэкапа поверх (если он существовал)
+        if incr_backup_path:
+            incr_tar = os.path.join(incr_backup_path, "base.tar.gz")
+            logger.info(f"Addition of binary incremental changes ({incr_tar})...")
+            with tarfile.open(incr_tar, "r:gz") as tar:
+                tar.extractall(path=TARGET_PG_DATA_DIR)
 
-            for user in users_to_anonymize:
-                user_id = user.id
-                logger.info(f"Anonymizing user {user_id}...")
+        # Сборка и интеграция журналов транзакций (WAL)
+        # Создаем временный буфер для слияния логов из полной и инкрементальной копий
+        temp_wal_buffer = os.path.join(TARGET_PG_DATA_DIR, "pg_wal_recovery_buffer")
+        os.makedirs(temp_wal_buffer, exist_ok=True)
 
-                anonymous_suffix = str(uuid.uuid4())[:8]
-                anonymized_email = f"anonymous_{anonymous_suffix}@carsharing.internal"
+        # Вытаскиваем WAL из полной копии
+        with tarfile.open(os.path.join(full_backup_path, "pg_wal.tar.gz"), "r:gz") as tar:
+            tar.extractall(path=temp_wal_buffer)
 
-                user.email = anonymized_email
-                user.phone = f"+0000000{anonymous_suffix}"
-                user.first_name = "Anonymous"
-                user.last_name = "Anonymous"
+        # Вытаскиваем WAL из инкремента (они перезапишут старые логи более свежими транзакциями)
+        if incr_backup_path:
+            with tarfile.open(os.path.join(incr_backup_path, "pg_wal.tar.gz"), "r:gz") as tar:
+                tar.extractall(path=temp_wal_buffer)
 
-                main_rides = db.query(MainRide).filter(
-                    MainRide.user_id == user_id
-                ).all()
+        # Переносим все собранные WAL-файлы в системную директорию pg_wal
+        native_wal_dir = os.path.join(TARGET_PG_DATA_DIR, "pg_wal")
+        os.makedirs(native_wal_dir, exist_ok=True)
+        for wal_file in os.listdir(temp_wal_buffer):
+            shutil.move(os.path.join(temp_wal_buffer, wal_file), os.path.join(native_wal_dir, wal_file))
+        shutil.rmtree(temp_wal_buffer)
 
-                for ride in main_rides:
-                    ride.status = "USER_ANONYMIZED"
+        # КРИТИЧЕСКИЙ ШАГ: Создание триггера восстановления для PostgreSQL 17
+        # Пустой файл recovery.signal заставит вошедшую в сеть базу понять, что она восстанавливается
+        signal_file_path = os.path.join(TARGET_PG_DATA_DIR, "recovery.signal")
+        with open(signal_file_path, "w") as f:
+            f.write("")
+        
+        # Инструктируем конфигурационный файл СУБД докатить транзакции до самого актуального состояния LSN
+        postgresql_conf_path = os.path.join(TARGET_PG_DATA_DIR, "postgresql.conf")
+        with open(postgresql_conf_path, "a", encoding="utf-8") as f:
+            f.write("\n# Инструкции автоматического восстановления Disaster Recovery\n")
+            f.write("recovery_target_timeline = 'latest'\n")
 
-                archive_rides = []
-
-                logger.info(f"User {user_id} anonymized: {len(main_rides)} main rides, {len(archive_rides)} archive rides")
-
-            db.commit()
-            logger.info(f"Successfully anonymized {len(users_to_anonymize)} users and their associated data.")
-
-            config_summary = rules_engine.get_config_summary()
-            logger.info(f"Anonymization completed with configuration:\n{config_summary}")
+        logger.info("=======================================================")
+        logger.info("EMERGENCY FILE RECOVERY ENDED WELL!")
+        logger.critical("you can start database container now")
+        logger.info("=======================================================")
 
     except Exception as e:
-        error_config = rules_engine.get_error_handling_config()
-        logger.error(f"Anonymizer job failed: {e}. Retry configuration: {error_config}")
-
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"Error details: {error_details}")
-
-        try:
-            db.rollback()
-            logger.info("Transaction rolled back due to error")
-        except:
-            logger.warning("Could not rollback transaction")
-
+        logger.critical(f"EMERGENCY FILE RECOVERY ENDED WITH ERROR: {e}")
+        logger.error(f"Errors stack:\n{traceback.format_exc()}")
         raise
 
 
 if __name__ == "__main__":
-    run_anonymizer()
+ run_backuper()

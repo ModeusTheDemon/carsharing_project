@@ -11,9 +11,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def get_db():
     """
     Контекстный менеджер для работы с сессией БД.
-    Использование:
-        with get_db() as session:
-            session.query(...)
     """
     db = SessionLocal()
     try:
