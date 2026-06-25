@@ -12,6 +12,7 @@ from policies.rules_engine import RetentionRulesEngine
 from utils.disck_getter import get_all_disks
 from utils.backup_verifier import verify_backup
 from utils.find_latest_backup import find_latest_backups
+from utils.rotator import run_backup_rotation
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
@@ -90,6 +91,8 @@ def run_incremental_saver():
             if not verify_backup(temp_backup_dir, parent_backup_path=latest_full):
                 raise RuntimeError("Downloaded incremental backup files failed pg_verifybackup validation check!")
             logger.info("Incremental backup integrity verification passed successfully.")
+
+            run_backup_rotation()
         except FileNotFoundError:
             raise RuntimeError("Verification impossible: parent full backup not found on disks!")
         # ====================================================

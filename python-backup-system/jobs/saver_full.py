@@ -11,6 +11,7 @@ from config import Settings
 from policies.rules_engine import RetentionRulesEngine
 from utils.disck_getter import get_all_disks
 from utils.backup_verifier import verify_backup  # Импорт функции верификации
+from utils.rotator import run_backup_rotation
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
@@ -99,6 +100,8 @@ def run_full_saver():
         os.makedirs(MANIFEST_STORAGE_DIR, exist_ok=True)
         shutil.copy2(os.path.join(temp_backup_dir, "backup_manifest"), LAST_MANIFEST_PATH)
         logger.info(f"Base backup_manifest successfully cached for future increments at: {LAST_MANIFEST_PATH}")
+
+        run_backup_rotation()
 
         config_summary = rules_engine.get_config_summary()
         logger.info(f"Full backup job completed successfully. Config summary:\n{config_summary}")
