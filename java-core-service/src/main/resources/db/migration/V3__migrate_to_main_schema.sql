@@ -1,3 +1,5 @@
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ride_id UUID NOT NULL,
 -- ==========================================
 -- Миграция данных из схемы public в схему main
 -- ==========================================
@@ -15,6 +17,10 @@ CREATE TABLE IF NOT EXISTS main.users (
     password_hash VARCHAR(255) NOT NULL,
     is_deleted BOOLEAN DEFAULT FALSE,
     deleted_at TIMESTAMP,
+<<<<<<< HEAD
+    terms_accepted BOOLEAN DEFAULT TRUE,
+=======
+>>>>>>> parent of bf41481 (Fixed database directory files)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
