@@ -4,13 +4,14 @@ import os
 import shutil
 import subprocess
 import traceback
-from typing import List
-import psutil
 from sqlalchemy import text
 
 from database.session import get_db
 from config import Settings
 from policies.rules_engine import RetentionRulesEngine
+from utils.disck_getter import get_all_disks
+from utils.backup_verifier import verify_backup
+from utils.find_latest_backup import find_latest_backups
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
@@ -20,23 +21,6 @@ logger = logging.getLogger(__name__)
 # Путь к манифесту, который был сохранен после полного сохранения
 MANIFEST_STORAGE_DIR = os.path.join(os.getcwd(), "backup_meta")
 LAST_MANIFEST_PATH = os.path.join(MANIFEST_STORAGE_DIR, "backup_manifest")
-
-
-def get_all_disks() -> List[str]:
-    """Возвращает список путей ко всем доступным дискам в системе."""
-    logger.info("Getting available disks list for incremental backup")
-    
-    disks: List[str] = []
-    try:
-        for part in psutil.disk_partitions(all=False):
-            if os.name == "nt" and "cdrom" in part.opts:
-                continue
-            if os.path.exists(part.mountpoint):
-                disks.append(part.mountpoint)
-    except Exception as e:
-        logger.error(f"Error occurred while scanning disks: {e}")
-    
-    return disks
 
 
 def run_incremental_saver():
@@ -59,7 +43,7 @@ def run_incremental_saver():
     DB_PORT = Settings.DB_PORT
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    
+
     # Временная папка для генерации инкрементальных файлов
     temp_backup_dir = os.path.join(os.getcwd(), f"temp_phys_incr_backup_{timestamp}")
 
@@ -74,18 +58,18 @@ def run_incremental_saver():
         env["PGPASSWORD"] = DB_PASSWORD
 
         logger.info(f"Launching pg_basebackup with incremental flag using manifest: {LAST_MANIFEST_PATH}")
-        
+
         # Команда инкрементального копирования для PostgreSQL 17
         backup_cmd = [
             "pg_basebackup",
             "-h", DB_HOST,
             "-p", DB_PORT,
             "-U", DB_USER,
-            "-D", temp_backup_dir,              # Директория для временных файлов
-            "-Ft",                              # Формат 'tar'
-            "-z",                               # Сжатие gzip на лету (.tar.gz)
-            "-X", "stream",                     # Включает WAL-логи инкрементального периода
-            "--incremental", LAST_MANIFEST_PATH # КЛЮЧЕВОЙ ФЛАГ PG 17: передаем базовый манифест
+            "-D", temp_backup_dir,  # Директория для временных файлов
+            "-Ft",  # Формат 'tar'
+            "-z",  # Сжатие gzip на лету (.tar.gz)
+            "-X", "stream",  # Включает WAL-логи инкрементального периода
+            "--incremental", LAST_MANIFEST_PATH  # КЛЮЧЕВОЙ ФЛАГ PG 17: передаем базовый манифест
         ]
 
         # Запуск системной утилиты внутри контейнера воркера
@@ -95,6 +79,20 @@ def run_incremental_saver():
             raise RuntimeError(f"pg_basebackup incremental failed with error: {result.stderr}")
 
         logger.info(f"Master incremental backup successfully created in temp directory: {temp_backup_dir}")
+
+        # === ВЕРИФИКАЦИЯ ИНКРЕМЕНТА ПЕРЕД ЗАПИСЬЮ НА ДИСКИ ===
+        logger.info("Launching post-backup incremental integrity validation...")
+        try:
+            # Находим родительский полный бэкап
+            latest_full, _ = find_latest_backups()
+
+            # Запускаем верификацию инкремента с указанием пути к его полному родителю
+            if not verify_backup(temp_backup_dir, parent_backup_path=latest_full):
+                raise RuntimeError("Downloaded incremental backup files failed pg_verifybackup validation check!")
+            logger.info("Incremental backup integrity verification passed successfully.")
+        except FileNotFoundError:
+            raise RuntimeError("Verification impossible: parent full backup not found on disks!")
+        # ====================================================
 
         # Поиск дисков и копирование измененных архивов
         disks = get_all_disks()

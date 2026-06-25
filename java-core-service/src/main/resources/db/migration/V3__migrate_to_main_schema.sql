@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS main.users (
     password_hash VARCHAR(255) NOT NULL,
     is_deleted BOOLEAN DEFAULT FALSE,
     deleted_at TIMESTAMP,
+    terms_accepted BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

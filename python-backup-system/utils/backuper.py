@@ -3,64 +3,13 @@ import os
 import shutil
 import tarfile
 import traceback
-from typing import List, Tuple
-import psutil
+from utils.find_latest_backup import find_latest_backups
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-def get_all_disks() -> List[str]:
-    """Сканирует систему и возвращает пути ко всем доступным дискам."""
-    logger.info("Scaning discs for any backups...")
-    disks: List[str] = []
-    try:
-        for part in psutil.disk_partitions(all=False):
-            if os.name == "nt" and "cdrom" in part.opts:
-                continue
-            if os.path.exists(part.mountpoint):
-                disks.append(part.mountpoint)
-    except Exception as e:
-        logger.error(f"Error occured while scaning file system: {e}")
-    return disks
-
-
-def find_latest_backups() -> Tuple[str, str]:
-    """Находит на дисках самый свежий полный бэкап и последний инкремент к нему."""
-    disks = get_all_disks()
-    full_backups = []
-    incr_backups = []
-
-    for disk in disks:
-        full_dir = os.path.join(disk, "db_physical_full_backups")
-        incr_dir = os.path.join(disk, "db_physical_incremental_backups")
-
-        if os.path.exists(full_dir):
-            for d in os.listdir(full_dir):
-                full_backups.append(os.path.join(full_dir, d))
-        
-        if os.path.exists(incr_dir):
-            for d in os.listdir(incr_dir):
-                incr_backups.append(os.path.join(incr_dir, d))
-
-    if not full_backups:
-        raise FileNotFoundError("CRITICAL ERROR: not found any full physical copies!")
-
-    # Сортируем по времени изменения папки (выбираем самый свежий)
-    latest_full = max(full_backups, key=os.path.getmtime)
-    logger.info(f"Found base full copy: {latest_full}")
-    
-    # Ищем инкремент, который был сделан строго после этого полного бэкапа
-    latest_incr = None
-    if incr_backups:
-        valid_incrs = [i for i in incr_backups if os.path.getmtime(i) > os.path.getmtime(latest_full)]
-        if valid_incrs:
-            latest_incr = max(valid_incrs, key=os.path.getmtime)
-            logger.info(f"Found latest weekly increment: {latest_incr}")
-
-    return latest_full, latest_incr
 
 
 def run_backuper():
@@ -126,7 +75,7 @@ def run_backuper():
             shutil.move(os.path.join(temp_wal_buffer, wal_file), os.path.join(native_wal_dir, wal_file))
         shutil.rmtree(temp_wal_buffer)
 
-        # КРИТИЧЕСКИЙ ШАГ: Создание триггера восстановления для PostgreSQL 17
+        # Создание триггера восстановления для PostgreSQL 17
         # Пустой файл recovery.signal заставит вошедшую в сеть базу понять, что она восстанавливается
         signal_file_path = os.path.join(TARGET_PG_DATA_DIR, "recovery.signal")
         with open(signal_file_path, "w") as f:

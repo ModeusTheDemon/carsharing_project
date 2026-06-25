@@ -4,13 +4,13 @@ import os
 import shutil
 import subprocess
 import traceback
-from typing import List
-import psutil
 from sqlalchemy import text
 
 from database.session import get_db
 from config import Settings
 from policies.rules_engine import RetentionRulesEngine
+from utils.disck_getter import get_all_disks
+from utils.backup_verifier import verify_backup  # Импорт функции верификации
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s] - %(message)s"
@@ -20,23 +20,6 @@ logger = logging.getLogger(__name__)
 # Папка с манифест для инкрементальной джобы
 MANIFEST_STORAGE_DIR = os.path.join(os.getcwd(), "backup_meta")
 LAST_MANIFEST_PATH = os.path.join(MANIFEST_STORAGE_DIR, "backup_manifest")
-
-
-def get_all_disks() -> List[str]:
-    """Возвращает список путей ко всем доступным дискам в системе."""
-    logger.info("Getting available disks list")
-    disks: List[str] = []
-    
-    try:
-        for part in psutil.disk_partitions(all=False):
-            if os.name == "nt" and "cdrom" in part.opts:
-                continue
-            if os.path.exists(part.mountpoint):
-                disks.append(part.mountpoint)
-    except Exception as e:
-        logger.error(f"Error occurred while scanning disks: {e}")
-    
-    return disks
 
 
 def run_full_saver():
@@ -51,7 +34,7 @@ def run_full_saver():
     DB_PORT = Settings.DB_PORT
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    
+
     # Временная папка для генерации файлов репликации
     temp_backup_dir = os.path.join(os.getcwd(), f"temp_phys_full_backup_{timestamp}")
 
@@ -67,17 +50,17 @@ def run_full_saver():
         env["PGPASSWORD"] = DB_PASSWORD
 
         logger.info("Launching pg_basebackup for FULL physical replication...")
-        
+
         # Команда копирования для PostgreSQL 17
         backup_cmd = [
             "pg_basebackup",
             "-h", DB_HOST,
             "-p", DB_PORT,
             "-U", DB_USER,
-            "-D", temp_backup_dir,   # Директория для временного сохранения файлов
-            "-Ft",                   # Формат 'tar' (упаковывает таблицы в base.tar)
-            "-z",                    # Сжатие gzip на лету (.tar.gz)
-            "-X", "stream",          # Включает все активные WAL-логи для консистентности
+            "-D", temp_backup_dir,  # Директория для временного сохранения файлов
+            "-Ft",  # Формат 'tar' (упаковывает таблицы в base.tar)
+            "-z",  # Сжатие gzip на лету (.tar.gz)
+            "-X", "stream",  # Включает все активные WAL-логи для консистентности
         ]
 
         # Запуск системной утилиты внутри контейнера воркера
@@ -87,6 +70,13 @@ def run_full_saver():
             raise RuntimeError(f"pg_basebackup failed with error: {result.stderr}")
 
         logger.info(f"Master full backup successfully created in temp directory: {temp_backup_dir}")
+
+        # === ВЕРИФИКАЦИЯ ЦЕЛОСТНОСТИ ПЕРЕД ЗАПИСЬЮ НА ДИСКИ ===
+        logger.info("Launching post-backup integrity validation...")
+        if not verify_backup(temp_backup_dir):
+            raise RuntimeError("Downloaded physical backup files failed pg_verifybackup validation check!")
+        logger.info("Backup integrity verification passed successfully. Proceeding to target disks distribution.")
+        # ====================================================
 
         # Поиск дисков и копирование архивов
         disks = get_all_disks()

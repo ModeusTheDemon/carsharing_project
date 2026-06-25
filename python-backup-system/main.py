@@ -17,7 +17,8 @@ app.conf.update(
     enable_utc=True,
     task_serializer="json",
     accept_content=["json"],
-    result_serializer="json"
+    result_serializer="json",
+    task_default_queue = "backup_tasks"
 )
 
 # Обертываем наши функции в задачи Celery
@@ -35,10 +36,10 @@ def task_save_full():
 
 # Настраиваем ритмичное расписание (Celery Beat Schedule)
 app.conf.beat_schedule = {
-    # 1. Проверка проводится каждые 5 минут (или при уведомлении монитора) TODO: сделать монитор(health monitor)
+    # 1. Проверка проводится каждые 5 минут (или при уведомлении монитора) TODO: сделать монитор(health monitor) (когда-нибудь)
     "check-every-five-minutes": {
         "task": "tasks.check_database_health",
-        "schedule": crontab(minute="*\5"),
+        "schedule": crontab(minute="*/5"),
     },
     # 2. бэкап инкремента проводится каждую неделю
     "save-increment-every-week": {
@@ -48,6 +49,6 @@ app.conf.beat_schedule = {
     # 3. бэкап полный каждый месяц
     "save-full-every-mounth": {
         "task": "tasks.save_full",
-        "schedule": crontab(),
+        "schedule": crontab(minute=0, hour=0, day_of_month=1),
     },
 }
